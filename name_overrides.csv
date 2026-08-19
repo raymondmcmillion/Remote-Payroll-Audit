@@ -1,0 +1,22 @@
+Remote Name,Gusto Last,Gusto First,Notes
+Sandra Gómez López,Gómez López,Sandra,Accent normalization gap
+Stéphan Bien-Aimé,Bien-Aimé,Stéphan,Accent normalization gap
+François Daoud,Daoud,François,Accent normalization gap
+Kim Seneca,Seneca,Kimberly,Kim = Kimberly (preferred vs legal)
+Tori Sarmiento,Sarmiento,Victoria,Tori = Victoria (preferred vs legal)
+Jamie R Boyer,Boyer,James,Jamie = James (preferred vs legal)
+Keneth S Carney Jr,Carney,Ken,Ken = Keneth nickname
+Kathy Nguyen,Nguyen,Cat Tien,Kathy = Cat Tien (preferred vs legal)
+Scott Taylor,Taylor,Michael Scott,Uses middle name in Remote
+George Vavlas,Vavlas,Giorgio,George/Giorgio (English vs Greek)
+Rob Brame,Brame,Edward,Rob = Edward (preferred vs legal)
+Naish Berran,Berran,Ignatius,Naish = Ignatius (preferred vs legal)
+Ahmed Patel,Patel,Kamil,Ahmed = Kamil (preferred vs legal)
+Elvis Alkhas,Alkhas Saatloui,Elvis,Compound last name in Gusto
+Carisse Zorrilla,Zorrilla Medina,Carisse,Compound last name in Gusto
+Maria Valentina Garzon Rodriguez,Garzón,Maria,Accent + compound last name dropped in Gusto
+Karly Susan Plata,Plata,Karlt,Typo in Gusto (Karlt) + empty col G in mapping
+Mitchell Gray,Gray III,Robert,Mitchell = Robert (preferred vs legal) + suffix in Gusto last name
+Robert Gregory Irving III,Irving III,Robert,Suffix fallback was colliding with Mitchell Gray (Gray III)
+Robert Michael Kempton Jr,Kempton Jr,Robert,Jr is part of Gusto last name (not stripped)
+Josh Hall,Hall,Joshua,Josh = Joshua (preferred vs legal)
