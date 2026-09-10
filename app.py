@@ -15,7 +15,9 @@ with col1:
     input_file   = st.file_uploader("① Remote Input Workbook (.xlsx)", type=["xlsx"])
     mapping_file = st.file_uploader("③ Mapping / Processing File (.csv)", type=["csv"])
 with col2:
-    output_file  = st.file_uploader("② Gusto Output Journal (.csv)", type=["csv"])
+    output_file      = st.file_uploader("② Gusto Output Journal (.csv)", type=["csv"])
+    incentive_file   = st.file_uploader("④ Incentives Export (.csv) — Optional", type=["csv"],
+                                        help="Upload the Remote incentives CSV to identify gross-ups. Not required.")
 
 st.divider()
 
@@ -49,6 +51,11 @@ if ready:
                 with open(in_path,  "wb") as f: f.write(input_file.getvalue())
                 with open(out_path, "wb") as f: f.write(output_file.getvalue())
                 with open(map_path, "wb") as f: f.write(mapping_file.getvalue())
+
+                inc_path = ''
+                if incentive_file:
+                    inc_path = os.path.join(tmpdir, "incentives.csv")
+                    with open(inc_path, "wb") as f: f.write(incentive_file.getvalue())
 
                 # Copy name_overrides.csv from script directory
                 script_dir   = os.path.dirname(os.path.abspath(__file__))
@@ -84,6 +91,8 @@ if ready:
                              f"MAPPING_PATH = r'{map_path}'", src)
                 src = re.sub(r"RESULT_PATH\s*=\s*'[^']+'",
                              f"RESULT_PATH  = r'{res_path}'", src)
+                src = re.sub(r"INCENTIVE_PATH\s*=\s*'[^']*'",
+                             f"INCENTIVE_PATH = r'{inc_path}'", src)
 
                 # Patch pay period display strings
                 period_label = f"{ps.strftime('%B %-d')} – {pe.strftime('%-d, %Y')}"
