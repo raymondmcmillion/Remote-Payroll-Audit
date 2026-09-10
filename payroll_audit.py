@@ -266,6 +266,45 @@ for r in _pi_rows[1:]:
 def pi_get(eid, canon):
     return pi_totals.get(eid, {}).get(canon, 0.0)
 
+# ─── READ INCENTIVE TAB ───────────────────────────────────────────────────────
+# inc_net[eid]         = list of {'amount', 'type', 'psp_code', 'note'} for "net" rows
+# inc_gross_total[eid] = sum of "gross" incentive amounts (non-gross-up)
+# pi_incentive_total[eid] = sum of Pay Items where Data Source = "Incentive"
+inc_net           = defaultdict(list)
+inc_gross_total   = defaultdict(float)
+pi_incentive_total = defaultdict(float)
+
+_inc_ws = _wb['Incentives'] if 'Incentives' in _wb.sheetnames else None
+if _inc_ws:
+    _inc_rows = list(_inc_ws.iter_rows(values_only=True))
+    _INC = {str(c): i for i, c in enumerate(_inc_rows[0]) if c is not None}
+    for r in _inc_rows[1:]:
+        row      = [str(c) if c is not None else '' for c in r]
+        eid      = row[_INC.get('Employment ID', 0)].strip()
+        if not eid:
+            continue
+        tax_type = row[_INC.get('Amount tax type', 7)].strip().lower()
+        amt      = parse_amount(row[_INC.get('Amount', 5)])
+        inc_type = row[_INC.get('Type', 9)].strip()
+        psp_code = row[_INC.get('PSP Code', 17)].strip()
+        note     = row[_INC.get('Note', 10)].strip()
+        if tax_type == 'net':
+            inc_net[eid].append({'amount': amt, 'type': inc_type,
+                                 'psp_code': psp_code, 'note': note})
+        else:
+            inc_gross_total[eid] += amt
+
+_PI_DS_IDX  = _PI.get('Data Source', -1)
+_PI_VAL_IDX = _PI.get('Value', 9)
+_PI_EID_IDX = _PI.get('Employment ID', 0)
+for _r in _pi_rows[1:]:
+    _row = [str(c) if c is not None else '' for c in _r]
+    _eid = _row[_PI_EID_IDX].strip()
+    if not _eid:
+        continue
+    if _PI_DS_IDX >= 0 and _row[_PI_DS_IDX].strip().lower() == 'incentive':
+        pi_incentive_total[_eid] += parse_amount(_row[_PI_VAL_IDX])
+
 # ─── READ OUTPUT (CSV — clean single header) ──────────────────────────────────
 with open(OUTPUT_PATH, 'r', encoding='utf-8-sig') as f:
     raw = list(csv.reader(f))
@@ -1175,76 +1214,71 @@ fmt_currency(ws_exp, ['D', 'E', 'F'])
 set_col_widths(ws_exp, [35, 10, 18, 20, 20, 12, 14, 45])
 
 
-# ─── SHEET: GROSS UP (Allowances & Stipends — Payroll Summary vs Gusto) ─────
-# Uses Payroll Summary tab as input source (Total Allowance + Total Stipend)
-# compared against Gusto Allowance + WFH Stipend output columns.
+# ─── SHEET: GROSS UP (Incentive Tab "Net" items → Pay Items → Gusto) ─────────
+# Identifies gross-up items via Incentive tab (Amount tax type = "net").
+# Uses Pay Items (DataSource=Incentive) as input source via process of elimination.
+# Single net  : isolate gross-up amount = PI Incentive total - Incentive gross total
+# Multiple nets: flag "Multiple Nets – Review" for manual review
 ws_gross = wb.create_sheet('Gross Up')
 header_row(ws_gross, [
     'Employee Name', 'Emp ID', 'Department',
-    'Input Allowance\n(Payroll Summary)', 'Input Stipend\n(Payroll Summary)', 'Combined Input',
-    'Output Allowance\n(Gusto)', 'Output WFH Stipend\n(Gusto)', 'Combined Output',
-    'Difference', 'Match?', 'Allowance Description', 'Stipend Description'
+    'Incentive Type', 'Net Amount\n(Incentive Tab)',
+    'Gross-Up Amount\n(Pay Items)', 'Gusto Output',
+    'Difference', 'Status'
 ])
 freeze(ws_gross)
 
 for ir, or_, dept in matched:
-    in_allow = get_amount(ir, IN_ALLOW) if IN_ALLOW >= 0 else 0.0
-    in_stip  = get_amount(ir, IN_STIP)  if IN_STIP  >= 0 else 0.0
-    combined_in = round(in_allow + in_stip, 2)
-
-    out_allow = oval(or_, ALLOW_OUT_IDX)
-    out_stip  = oval(or_, WFH_OUT_IDX)
-    combined_out = round(out_allow + out_stip, 2)
-
-    if combined_in == 0 and combined_out == 0:
+    eid  = str(ir[IN_EMP_ID]).strip()
+    nets = inc_net.get(eid)
+    if not nets:
         continue
 
-    diff  = round(combined_in - combined_out, 2)
-    match = 'Match' if abs(diff) < VARIANCE_THRESHOLD else 'Mismatch'
-    if match == 'Match':
+    if len(nets) > 1:
+        net_total = sum(n['amount'] for n in nets)
+        types     = ', '.join(dict.fromkeys(n['type'] for n in nets))
+        ws_gross.append([
+            ir[IN_NAME], eid, dept_slug(dept),
+            types, net_total, '—', '—', '—', 'Multiple Nets – Review'
+        ])
+        r = ws_gross.max_row
+        ws_gross.cell(r, 9).fill = ORANGE
         continue
-    mfill = GREEN if match == 'Match' else RED
 
-    allow_desc = get_desc(ir, IN_ALLOW_DESC)
-    stip_desc  = get_desc(ir, IN_STIP_DESC)
+    net_item = nets[0]
+    net_amt  = net_item['amount']
+
+    # Process of elimination: total incentive Pay Items minus known gross amounts
+    pi_inc      = round(pi_incentive_total.get(eid, 0.0), 2)
+    non_gu      = round(inc_gross_total.get(eid, 0.0), 2)
+    gross_up_in = round(pi_inc - non_gu, 2)
+
+    # Gusto: isolate gross-up = Gusto Allowance minus non-gross-up incentive amounts
+    gusto_allow   = oval(or_, ALLOW_OUT_IDX)
+    gusto_gross_up = round(gusto_allow - non_gu, 2)
+
+    diff = round(gross_up_in - gusto_gross_up, 2)
+    if abs(diff) < VARIANCE_THRESHOLD:
+        status = 'Match'
+        sfill  = GREEN
+    else:
+        status = 'Needs Review'
+        sfill  = RED
 
     ws_gross.append([
-        ir[IN_NAME], ir[IN_EMP_ID], dept_slug(dept),
-        in_allow, in_stip, combined_in,
-        out_allow, out_stip, combined_out,
-        diff, match, allow_desc, stip_desc
+        ir[IN_NAME], eid, dept_slug(dept),
+        net_item['type'], net_amt,
+        gross_up_in, gusto_gross_up,
+        diff, status
     ])
     r = ws_gross.max_row
-    ws_gross.cell(r, 11).fill = mfill
+    ws_gross.cell(r, 9).fill = sfill
     if r % 2 == 0:
-        for c in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13]:
+        for c in range(1, 9):
             ws_gross.cell(r, c).fill = ALT
 
-# Also include archived employees from input_only (no Gusto output row — output = 0)
-for ir, dept, miss_reason in input_only:
-    if ir[IN_STATUS].strip().lower() != 'archived':
-        continue
-    in_allow = get_amount(ir, IN_ALLOW) if IN_ALLOW >= 0 else 0.0
-    in_stip  = get_amount(ir, IN_STIP)  if IN_STIP  >= 0 else 0.0
-    combined_in = round(in_allow + in_stip, 2)
-    if combined_in == 0:
-        continue
-    allow_desc = get_desc(ir, IN_ALLOW_DESC)
-    stip_desc  = get_desc(ir, IN_STIP_DESC)
-    ws_gross.append([
-        ir[IN_NAME], ir[IN_EMP_ID], dept_slug(dept) if dept else '',
-        in_allow, in_stip, combined_in,
-        0.0, 0.0, 0.0,
-        combined_in, 'Not in Gusto', allow_desc, stip_desc
-    ])
-    r = ws_gross.max_row
-    ws_gross.cell(r, 11).fill = ORANGE
-    if r % 2 == 0:
-        for c in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13]:
-            ws_gross.cell(r, c).fill = ALT
-
-fmt_currency(ws_gross, ['D', 'E', 'F', 'G', 'H', 'I', 'J'])
-set_col_widths(ws_gross, [35, 10, 18, 18, 16, 16, 18, 18, 16, 12, 12, 35, 35])
+fmt_currency(ws_gross, ['E', 'F', 'G', 'H'])
+set_col_widths(ws_gross, [32, 10, 18, 35, 16, 18, 16, 14, 18])
 
 # ─── SUMMARY SHEET ───────────────────────────────────────────────────────────
 ws0 = wb.create_sheet('Summary', 0)
@@ -1273,7 +1307,7 @@ summary_data = [
     ('Archived Employees',     ws7.max_row - 1),
     ('Retro Payments',         ws_retro.max_row - 1),
     ('Expenses',               ws_exp.max_row - 1),
-    ('Gross Up (Allow/Stip)',  ws_gross.max_row - 1),
+    ('Gross Up (Incentive Net)', ws_gross.max_row - 1),
 ]
 
 ws0.column_dimensions['A'].width = 28
