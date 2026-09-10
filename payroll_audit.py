@@ -410,6 +410,7 @@ def oi(name): return oc.get(name, -1)
 REG_AMT_IDX     = oi('Regular (Amount)')
 REG_HRS_IDX     = oi('Regular (Hours)')
 TO_AMT_IDX      = oi('Time Off (Amount)')
+HOLIDAY_AMT_IDX = oi('Paid Holidays (Amount)')  # Labor Day / holidays
 TO_HRS_IDX      = oi('Time Off (Hours)')
 PTO_OUT_HRS_IDX = oi('Outstanding Paid Time Off (Hours)')
 PTO_OUT_AMT_IDX = oi('Outstanding Paid Time Off (Amount)')
@@ -668,7 +669,7 @@ ws1.title = 'Base Salary Variances'
 header_row(ws1, [
     'Employee Name', 'Emp ID', 'Department', 'Annual Salary',
     'Input Period Gross', 'Output Regular', 'Output PTO Taken',
-    'Output Base Total', 'Variance ($)', 'Reason', 'Hire Date', 'Term Date'
+    'Output Paid Holiday', 'Output Base Total', 'Variance ($)', 'Reason', 'Hire Date', 'Term Date'
 ])
 # Note: No Paid Holidays column in July 16-31 output (no holidays in this period)
 freeze(ws1)
@@ -678,7 +679,8 @@ for ir, or_, dept in matched:
     period   = parse_amount(ir[IN_PERIOD])
     reg      = oval(or_, REG_AMT_IDX)
     to_      = oval(or_, TO_AMT_IDX)
-    out_base = round(reg + to_, 2)
+    holiday  = oval(or_, HOLIDAY_AMT_IDX) if HOLIDAY_AMT_IDX >= 0 else 0.0
+    out_base = round(reg + to_ + holiday, 2)
     variance = round(period - out_base, 2)
 
     if abs(variance) < VARIANCE_THRESHOLD:
@@ -702,19 +704,19 @@ for ir, or_, dept in matched:
 
     ws1.append([
         ir[IN_NAME], ir[IN_EMP_ID], dept_slug(dept), annual, period,
-        reg, to_, out_base, variance, reason,
+        reg, to_, holiday, out_base, variance, reason,
         str(ir[IN_JOIN]).strip() if ir[IN_JOIN] else '',
         str(ir[IN_TERM]).strip() if ir[IN_TERM] else ''
     ])
     r = ws1.max_row
-    ws1.cell(r, 10).fill = rfill
+    ws1.cell(r, 11).fill = rfill
     if r % 2 == 0:
-        for c in range(1, 10):
+        for c in range(1, 11):
             if ws1.cell(r, c).fill.fgColor.rgb == '00000000':
                 ws1.cell(r, c).fill = ALT
 
-fmt_currency(ws1, ['D', 'E', 'F', 'G', 'H', 'I'])
-set_col_widths(ws1, [32, 10, 18, 14, 16, 15, 15, 16, 13, 14, 13, 13])
+fmt_currency(ws1, ['D', 'E', 'F', 'G', 'H', 'I', 'J'])
+set_col_widths(ws1, [32, 10, 18, 14, 16, 15, 15, 13, 16, 13, 14, 13, 13])
 
 # ─── SHEET 2: TERM SHEET ─────────────────────────────────────────────────────
 ws2 = wb.create_sheet('Term Sheet')
@@ -723,7 +725,7 @@ header_row(ws2, [
     'Employee Name', 'Emp ID', 'Department', 'Annual Salary',
     'Term Date', 'Working Days in Period', 'Days Worked',
     'Expected Prorated Pay', 'Output Regular', 'Output PTO Taken',
-    'Output Base Total', 'Proration Match?', 'PTO Payout Hours'
+    'Output Paid Holiday', 'Output Base Total', 'Proration Match?', 'PTO Payout Hours'
 ])
 freeze(ws2)
 
@@ -741,7 +743,8 @@ for ir, or_, dept in matched:
 
     reg      = oval(or_, REG_AMT_IDX)
     to_      = oval(or_, TO_AMT_IDX)
-    out_base = round(reg + to_, 2)
+    holiday  = oval(or_, HOLIDAY_AMT_IDX) if HOLIDAY_AMT_IDX >= 0 else 0.0
+    out_base = round(reg + to_ + holiday, 2)
     pto_hrs  = ostr(or_, PTO_OUT_HRS_IDX)
 
     if abs(expected_pro - out_base) < VARIANCE_THRESHOLD:
@@ -754,17 +757,17 @@ for ir, or_, dept in matched:
     ws2.append([
         ir[IN_NAME], ir[IN_EMP_ID], dept_slug(dept), annual,
         term_dt.strftime('%m/%d/%Y'), TOTAL_WD, days_worked,
-        expected_pro, reg, to_, out_base,
+        expected_pro, reg, to_, holiday, out_base,
         match_str, pto_hrs if pto_hrs else '—'
     ])
     r = ws2.max_row
-    ws2.cell(r, 12).fill = mfill
+    ws2.cell(r, 13).fill = mfill
     if r % 2 == 0:
-        for c in [1,2,3,4,5,6,7,8,9,10,11,13]:
+        for c in [1,2,3,4,5,6,7,8,9,10,11,12,14]:
             ws2.cell(r, c).fill = ALT
 
-fmt_currency(ws2, ['D', 'H', 'I', 'J', 'K'])
-set_col_widths(ws2, [32, 10, 18, 14, 13, 14, 12, 20, 15, 15, 16, 14, 16])
+fmt_currency(ws2, ['D', 'H', 'I', 'J', 'K', 'L'])
+set_col_widths(ws2, [32, 10, 18, 14, 13, 14, 12, 20, 15, 15, 13, 16, 14, 16])
 
 # ─── SHEET 3: NEW HIRE SHEET ─────────────────────────────────────────────────
 ws3 = wb.create_sheet('New Hire Sheet')
@@ -773,7 +776,7 @@ header_row(ws3, [
     'Employee Name', 'Emp ID', 'Department', 'Annual Salary',
     'Hire Date', 'Working Days in Period', 'Days Worked',
     'Expected Prorated Pay', 'Output Regular', 'Output PTO Taken',
-    'Output Base Total', 'Match?'
+    'Output Paid Holiday', 'Output Base Total', 'Match?'
 ])
 freeze(ws3)
 
@@ -791,7 +794,8 @@ for ir, or_, dept in matched:
 
     reg      = oval(or_, REG_AMT_IDX)
     to_      = oval(or_, TO_AMT_IDX)
-    out_base = round(reg + to_, 2)
+    holiday  = oval(or_, HOLIDAY_AMT_IDX) if HOLIDAY_AMT_IDX >= 0 else 0.0
+    out_base = round(reg + to_ + holiday, 2)
 
     if abs(expected_pro - out_base) < VARIANCE_THRESHOLD:
         match_str = 'Match'
@@ -803,16 +807,16 @@ for ir, or_, dept in matched:
     ws3.append([
         ir[IN_NAME], ir[IN_EMP_ID], dept_slug(dept), annual,
         join_dt.strftime('%m/%d/%Y'), TOTAL_WD, days_worked,
-        expected_pro, reg, to_, out_base, match_str
+        expected_pro, reg, to_, holiday, out_base, match_str
     ])
     r = ws3.max_row
-    ws3.cell(r, 12).fill = mfill
+    ws3.cell(r, 13).fill = mfill
     if r % 2 == 0:
-        for c in range(1, 12):
+        for c in range(1, 13):
             ws3.cell(r, c).fill = ALT
 
-fmt_currency(ws3, ['D', 'H', 'I', 'J', 'K'])
-set_col_widths(ws3, [32, 10, 18, 14, 13, 14, 12, 20, 15, 15, 16, 14])
+fmt_currency(ws3, ['D', 'H', 'I', 'J', 'K', 'L'])
+set_col_widths(ws3, [32, 10, 18, 14, 13, 14, 12, 20, 15, 15, 13, 16, 14])
 
 # ─── SHEET 4: PAY ITEM FLAGS ─────────────────────────────────────────────────
 # Source of truth: Pay Items tab — all types compared against Gusto output columns
