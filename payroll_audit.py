@@ -163,6 +163,7 @@ INPUT_PATH   = '/sessions/ecstatic-nice-johnson/mnt/uploads/2 Pre Input.xlsx'
 OUTPUT_PATH  = '/sessions/ecstatic-nice-johnson/mnt/uploads/2 Pre Output.csv'
 MAPPING_PATH = '/sessions/ecstatic-nice-johnson/mnt/uploads/2 Mapping File.csv'
 RESULT_PATH  = '/sessions/ecstatic-nice-johnson/mnt/outputs/Payroll_Audit_July31_2026.xlsx'
+INCENTIVE_PATH = ''   # Optional: path to Incentives CSV export (leave '' to use Excel Incentives tab)
 
 # ─── WORKING DAYS ────────────────────────────────────────────────────────────
 def build_working_days(start, end):
@@ -266,44 +267,82 @@ for r in _pi_rows[1:]:
 def pi_get(eid, canon):
     return pi_totals.get(eid, {}).get(canon, 0.0)
 
+import os  # ensure os is available before config
 # ─── READ INCENTIVE TAB ───────────────────────────────────────────────────────
 # inc_net[eid]         = list of {'amount', 'type', 'psp_code', 'note'} for "net" rows
 # inc_gross_total[eid] = sum of "gross" incentive amounts (non-gross-up)
 # pi_incentive_total[eid] = sum of Pay Items where Data Source = "Incentive"
-inc_net           = defaultdict(list)
-inc_gross_total   = defaultdict(float)
+# Source: optional INCENTIVE_PATH CSV (from Remote incentives export) or Excel Incentives tab
+inc_net            = defaultdict(list)
+inc_gross_total    = defaultdict(float)
+inc_gross_amounts  = defaultdict(list)
+inc_gross_by_psp   = defaultdict(lambda: defaultdict(float))  # [eid][psp_lc] = gross total
 pi_incentive_total = defaultdict(float)
 
-_inc_ws = _wb['Incentives'] if 'Incentives' in _wb.sheetnames else None
-if _inc_ws:
-    _inc_rows = list(_inc_ws.iter_rows(values_only=True))
-    _INC = {str(c): i for i, c in enumerate(_inc_rows[0]) if c is not None}
-    for r in _inc_rows[1:]:
+def _load_incentive_rows_from_csv(csv_path):
+    """Read incentive rows from Remote incentives CSV export."""
+    import csv as _csv
+    rows = []
+    with open(csv_path, 'r', encoding='utf-8-sig') as _f:
+        reader = _csv.DictReader(_f)
+        for r in reader:
+            eid      = r.get('Employment ID', '').strip()
+            tax_type = r.get('Amount tax', '').strip().lower()   # "Net" or "Gross"
+            amt      = parse_amount(r.get('Amount', '0'))
+            inc_type = r.get('Type', '').strip()
+            psp_code = r.get('PSP Code', '').strip()
+            note     = r.get('Type', '').strip()                 # CSV has no Note; use Type
+            if eid:
+                rows.append((eid, tax_type, amt, inc_type, psp_code, note))
+    return rows
+
+def _load_incentive_rows_from_excel(wb):
+    """Read incentive rows from the Excel Incentives tab."""
+    ws = wb['Incentives'] if 'Incentives' in wb.sheetnames else None
+    if not ws:
+        return []
+    raw = list(ws.iter_rows(values_only=True))
+    hdrs = {str(c): i for i, c in enumerate(raw[0]) if c is not None}
+    rows = []
+    for r in raw[1:]:
         row      = [str(c) if c is not None else '' for c in r]
-        eid      = row[_INC.get('Employment ID', 0)].strip()
-        if not eid:
-            continue
-        tax_type = row[_INC.get('Amount tax type', 7)].strip().lower()
-        amt      = parse_amount(row[_INC.get('Amount', 5)])
-        inc_type = row[_INC.get('Type', 9)].strip()
-        psp_code = row[_INC.get('PSP Code', 17)].strip()
-        note     = row[_INC.get('Note', 10)].strip()
-        if tax_type == 'net':
-            inc_net[eid].append({'amount': amt, 'type': inc_type,
-                                 'psp_code': psp_code, 'note': note})
-        else:
-            inc_gross_total[eid] += amt
+        eid      = row[hdrs.get('Employment ID', 0)].strip()
+        tax_type = row[hdrs.get('Amount tax type', 7)].strip().lower()
+        amt      = parse_amount(row[hdrs.get('Amount', 5)])
+        inc_type = row[hdrs.get('Type', 9)].strip()
+        psp_code = row[hdrs.get('PSP Code', 17)].strip()
+        note     = row[hdrs.get('Note', 10)].strip()
+        if eid:
+            rows.append((eid, tax_type, amt, inc_type, psp_code, note))
+    return rows
+
+_inc_rows_data = (
+    _load_incentive_rows_from_csv(INCENTIVE_PATH)
+    if INCENTIVE_PATH and __import__('os').path.exists(INCENTIVE_PATH)
+    else _load_incentive_rows_from_excel(_wb)
+)
+for (eid, tax_type, amt, inc_type, psp_code, note) in _inc_rows_data:
+    if tax_type == 'net':
+        inc_net[eid].append({'amount': amt, 'type': inc_type,
+                             'psp_code': psp_code, 'note': note})
+    else:
+        inc_gross_total[eid] += amt
+        inc_gross_amounts[eid].append(amt)
+        inc_gross_by_psp[eid][psp_code.strip().lower()] += amt
 
 _PI_DS_IDX  = _PI.get('Data Source', -1)
 _PI_VAL_IDX = _PI.get('Value', 9)
 _PI_EID_IDX = _PI.get('Employment ID', 0)
+pi_incentive_amounts = defaultdict(list)
 for _r in _pi_rows[1:]:
     _row = [str(c) if c is not None else '' for c in _r]
     _eid = _row[_PI_EID_IDX].strip()
     if not _eid:
         continue
     if _PI_DS_IDX >= 0 and _row[_PI_DS_IDX].strip().lower() == 'incentive':
-        pi_incentive_total[_eid] += parse_amount(_row[_PI_VAL_IDX])
+        _amt = parse_amount(_row[_PI_VAL_IDX])
+        pi_incentive_total[_eid] += _amt
+        pi_incentive_amounts[_eid].append(_amt)
 
 # ─── READ OUTPUT (CSV — clean single header) ──────────────────────────────────
 with open(OUTPUT_PATH, 'r', encoding='utf-8-sig') as f:
@@ -323,7 +362,6 @@ with open(MAPPING_PATH, 'r', encoding='utf-8-sig') as f:
     map_rows = list(reader)
 
 # ─── NAME OVERRIDES ───────────────────────────────────────────────────────────
-import os
 OVERRIDES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'name_overrides.csv')
 name_overrides = {}
 if os.path.exists(OVERRIDES_PATH):
@@ -1214,6 +1252,17 @@ fmt_currency(ws_exp, ['D', 'E', 'F'])
 set_col_widths(ws_exp, [35, 10, 18, 20, 20, 12, 14, 45])
 
 
+# PSP code → Gusto output column index
+def _psp_to_gusto_col(psp_code):
+    lc = psp_code.strip().lower()
+    if lc in ('wfh stipend', 'wfh_stipend', 'stipend'):
+        return WFH_OUT_IDX
+    elif lc == 'bonus':
+        return BONUS_OUT_IDX if BONUS_OUT_IDX >= 0 else OTHER_OUT_IDX
+    elif lc in ('other', 'other earnings'):
+        return OTHER_OUT_IDX
+    return ALLOW_OUT_IDX  # default (Allowance)
+
 # ─── SHEET: GROSS UP (Incentive Tab "Net" items → Pay Items → Gusto) ─────────
 # Identifies gross-up items via Incentive tab (Amount tax type = "net").
 # Uses Pay Items (DataSource=Incentive) as input source via process of elimination.
@@ -1223,8 +1272,8 @@ ws_gross = wb.create_sheet('Gross Up')
 header_row(ws_gross, [
     'Employee Name', 'Emp ID', 'Department',
     'Incentive Type', 'Net Amount\n(Incentive Tab)',
-    'Gross-Up Amount\n(Pay Items)', 'Gusto Output',
-    'Difference', 'Status'
+    'Gross-Up Amount\n(Pay Items)', 'Difference', 'Pay Items\nStatus',
+    'Gusto Amount\n(Isolated)', 'Gusto Match?'
 ])
 freeze(ws_gross)
 
@@ -1235,14 +1284,49 @@ for ir, or_, dept in matched:
         continue
 
     if len(nets) > 1:
-        net_total = sum(n['amount'] for n in nets)
-        types     = ', '.join(dict.fromkeys(n['type'] for n in nets))
-        ws_gross.append([
-            ir[IN_NAME], eid, dept_slug(dept),
-            types, net_total, '—', '—', '—', 'Multiple Nets – Review'
-        ])
-        r = ws_gross.max_row
-        ws_gross.cell(r, 9).fill = ORANGE
+        # Sort-match: build pool from Pay Items (DataSource=Incentive), remove known gross amounts, match by value
+        pool = sorted(pi_incentive_amounts.get(eid, []), reverse=True)
+        for g_amt in sorted(inc_gross_amounts.get(eid, []), reverse=True):
+            if pool:
+                closest = min(pool, key=lambda x: abs(x - g_amt))
+                if abs(closest - g_amt) < VARIANCE_THRESHOLD:
+                    pool.remove(closest)
+        nets_sorted = sorted(nets, key=lambda n: n['amount'], reverse=True)
+        # Gusto: sum Gusto amounts across all unique PSP columns used by net entries,
+        # subtract gross amounts of the same PSP type from each column
+        _seen_psps_m = {}
+        for _ni in nets_sorted:
+            _p = _ni['psp_code'].strip().lower()
+            if _p not in _seen_psps_m:
+                _col = _psp_to_gusto_col(_p)
+                _seen_psps_m[_p] = oval(or_, _col) if _col >= 0 else 0.0
+        gusto_allow_m    = round(sum(_seen_psps_m.values()), 2)
+        non_gu_m         = round(sum(inc_gross_by_psp.get(eid, {}).get(_p, 0.0) for _p in _seen_psps_m), 2)
+        gusto_isolated_m = max(round(gusto_allow_m - non_gu_m, 2), 0.0)
+        total_pi_gu_m    = round(sum(pool[:len(nets_sorted)]), 2)
+        gusto_match_m    = 'Match' if abs(total_pi_gu_m - gusto_isolated_m) < VARIANCE_THRESHOLD else 'Needs Review'
+        gfill_m          = GREEN if gusto_match_m == 'Match' else RED
+        for i, net_item in enumerate(nets_sorted):
+            gross_up_for_this = round(pool[i], 2) if i < len(pool) else 0.0
+            diff_m = round(gross_up_for_this - net_item['amount'], 2)
+            if gross_up_for_this > net_item['amount'] + VARIANCE_THRESHOLD:
+                status_m = 'Grossed Up – Multiple Nets'
+                sfill_m  = GREEN
+            else:
+                status_m = 'Needs Review – Multiple Nets'
+                sfill_m  = ORANGE
+            ws_gross.append([
+                ir[IN_NAME], eid, dept_slug(dept),
+                net_item['type'], net_item['amount'],
+                gross_up_for_this, diff_m, status_m,
+                gusto_isolated_m, gusto_match_m
+            ])
+            r = ws_gross.max_row
+            ws_gross.cell(r, 8).fill = sfill_m
+            ws_gross.cell(r, 10).fill = gfill_m
+            if r % 2 == 0:
+                for c in [1,2,3,4,5,6,7,9]:
+                    ws_gross.cell(r, c).fill = ALT
         continue
 
     net_item = nets[0]
@@ -1253,32 +1337,42 @@ for ir, or_, dept in matched:
     non_gu      = round(inc_gross_total.get(eid, 0.0), 2)
     gross_up_in = round(pi_inc - non_gu, 2)
 
-    # Gusto: isolate gross-up = Gusto Allowance minus non-gross-up incentive amounts
-    gusto_allow   = oval(or_, ALLOW_OUT_IDX)
-    gusto_gross_up = round(gusto_allow - non_gu, 2)
-
-    diff = round(gross_up_in - gusto_gross_up, 2)
-    if abs(diff) < VARIANCE_THRESHOLD:
-        status = 'Match'
+    # Compare Pay Items gross-up vs net amount
+    diff = round(gross_up_in - net_amt, 2)
+    if gross_up_in > net_amt + VARIANCE_THRESHOLD:
+        status = 'Grossed Up'
         sfill  = GREEN
-    else:
+    elif gross_up_in > 0:
         status = 'Needs Review'
+        sfill  = ORANGE
+    else:
+        status = 'Not in Pay Items'
         sfill  = RED
+
+    # Gusto: use PSP code to find correct column; subtract gross amounts of same PSP type
+    _psp_lc        = net_item['psp_code'].strip().lower()
+    _gusto_col     = _psp_to_gusto_col(_psp_lc)
+    gusto_allow    = oval(or_, _gusto_col) if _gusto_col >= 0 else 0.0
+    non_gu         = round(inc_gross_by_psp.get(eid, {}).get(_psp_lc, 0.0), 2)
+    gusto_isolated = max(round(gusto_allow - non_gu, 2), 0.0)
+    gusto_match    = 'Match' if abs(gross_up_in - gusto_isolated) < VARIANCE_THRESHOLD else 'Needs Review'
+    gfill          = GREEN if gusto_match == 'Match' else RED
 
     ws_gross.append([
         ir[IN_NAME], eid, dept_slug(dept),
         net_item['type'], net_amt,
-        gross_up_in, gusto_gross_up,
-        diff, status
+        gross_up_in, diff, status,
+        gusto_isolated, gusto_match
     ])
     r = ws_gross.max_row
-    ws_gross.cell(r, 9).fill = sfill
+    ws_gross.cell(r, 8).fill = sfill
+    ws_gross.cell(r, 10).fill = gfill
     if r % 2 == 0:
-        for c in range(1, 9):
+        for c in [1,2,3,4,5,6,7,9]:
             ws_gross.cell(r, c).fill = ALT
 
-fmt_currency(ws_gross, ['E', 'F', 'G', 'H'])
-set_col_widths(ws_gross, [32, 10, 18, 35, 16, 18, 16, 14, 18])
+fmt_currency(ws_gross, ['E', 'F', 'G', 'I'])
+set_col_widths(ws_gross, [32, 10, 18, 35, 16, 18, 14, 18, 16, 14])
 
 # ─── SUMMARY SHEET ───────────────────────────────────────────────────────────
 ws0 = wb.create_sheet('Summary', 0)
@@ -1329,6 +1423,31 @@ for i, (label, value) in enumerate(summary_data, start=4):
         ws0.cell(i, 2).fill = H_FILL
     elif label:
         ws0.cell(i, 1).font = Font(bold=True, size=10)
+
+
+# ─── SHEET: GUSTO OUTPUT (raw output CSV) ────────────────────────────────────
+ws_out = wb.create_sheet('Gusto Output')
+ws_out.sheet_view.showGridLines = False
+freeze(ws_out)
+# Header row
+for ci, h in enumerate(out_headers, 1):
+    cell = ws_out.cell(1, ci, h if h is not None else '')
+    cell.font = Font(bold=True, size=10, color='FFFFFFFF')
+    cell.fill = PatternFill('solid', fgColor='FF1F3864')
+    cell.alignment = Alignment(horizontal='center', wrap_text=True)
+ws_out.row_dimensions[1].height = 28
+# Data rows
+for ri, row in enumerate(out_rows, 2):
+    for ci, val in enumerate(row, 1):
+        ws_out.cell(ri, ci, val)
+    if ri % 2 == 0:
+        for ci in range(1, len(out_headers) + 1):
+            ws_out.cell(ri, ci).fill = ALT
+# Auto-width (capped at 40)
+for ci, h in enumerate(out_headers, 1):
+    col_letter = ws_out.cell(1, ci).column_letter
+    max_len = max(len(str(h or '')), *(len(str(r[ci-1])) if ci-1 < len(r) else 0 for r in out_rows[:50]))
+    ws_out.column_dimensions[col_letter].width = min(max_len + 2, 40)
 
 # ─── SAVE ────────────────────────────────────────────────────────────────────
 wb.save(RESULT_PATH)
