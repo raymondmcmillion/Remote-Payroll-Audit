@@ -153,16 +153,16 @@ from openpyxl.utils import get_column_letter
 from datetime import datetime, date, timedelta
 
 # ─── CONFIGURATION ───────────────────────────────────────────────────────────
-PERIOD_START = date(2026, 7, 16)
-PERIOD_END   = date(2026, 7, 31)
+PERIOD_START = date(2026, 9, 16)
+PERIOD_END   = date(2026, 9, 30)
 PAY_PERIODS_PER_YEAR = 24
 ANNUAL_WORKING_DAYS  = 260
 VARIANCE_THRESHOLD   = 1.00  # dollars
 
-INPUT_PATH   = '/sessions/ecstatic-nice-johnson/mnt/uploads/2 Pre Input.xlsx'
-OUTPUT_PATH  = '/sessions/ecstatic-nice-johnson/mnt/uploads/2 Pre Output.csv'
-MAPPING_PATH = '/sessions/ecstatic-nice-johnson/mnt/uploads/2 Mapping File.csv'
-RESULT_PATH  = '/sessions/ecstatic-nice-johnson/mnt/outputs/Payroll_Audit_July31_2026.xlsx'
+INPUT_PATH   = '/sessions/ecstatic-nice-johnson/mnt/uploads/USA-2026-Sep-30th-Bi-monthly-Main.xlsx'
+OUTPUT_PATH  = '/sessions/ecstatic-nice-johnson/mnt/uploads/Payroll_Audit_Sep16_Sep30_2026 V2.xlsx - Gusto Output.csv'
+MAPPING_PATH = '/sessions/ecstatic-nice-johnson/mnt/Payroll Audit/name_overrides.csv'
+RESULT_PATH  = '/sessions/ecstatic-nice-johnson/mnt/outputs/Payroll_Audit_Sep30_2026.xlsx'
 INCENTIVE_PATH = ''   # Optional: path to Incentives CSV export (leave '' to use Excel Incentives tab)
 
 # ─── WORKING DAYS ────────────────────────────────────────────────────────────
@@ -221,10 +221,31 @@ _pi_hdrs = [str(c) if c is not None else '' for c in _pi_rows[0]]
 _PI = {h: i for i, h in enumerate(_pi_hdrs)}
 
 # Expense-type pay items that roll up into Gusto Reimbursements
-EXPENSE_PI_TYPES = {'expense non-taxable', 'expense taxable',
-                    'mileage non-taxable', 'per diem non-taxable'}
+# PSP Code → canonical type for Pay Items classification.
+# Using PSP Code (not Pay Item Name) is future-proof — new name variants are caught automatically.
+# None = skip (covered by base salary / hours sheets).
+PSP_CANON_MAP = {
+    # Skip types
+    'regular (amount)':       None,
+    'paid time off':          None,
+    'unpaid time off':        None,
+    'other leave':            None,
+    'correction':             None,
+    # Expense / reimbursement
+    'reimbursement':          'expense',
+    '195_reemb_despesas':     'expense',
+    # Pay item types
+    'allowance':              'allowance',
+    'wfh stipend':            'wfh stipend',
+    'stipend':                'wfh stipend',
+    'retro':                  'retro',
+    'other':                  'other earnings',
+    'wil':                    'wages in lieu',
+    'overtime (amount)':      'overtime',
+    'bonus':                  'bonus',
+}
 
-# Skip types that are already covered by Base Salary / Hours sheets
+# SKIP_PI_TYPES kept as item-name fallback for rows missing a PSP Code
 SKIP_PI_TYPES = {'regular salary', 'paid time off', 'unpaid time off',
                  'other leave', 'correction'}
 
@@ -238,29 +259,37 @@ pi_emp_name = {}                  # eid -> name
 # retro still needs note for Retro sheet
 retro_by_emp_id = {}
 
+_PI_PSP_IDX = _PI.get('PSP Code', -1)
+
 for r in _pi_rows[1:]:
     row     = [str(c) if c is not None else '' for c in r]
     eid     = row[_PI['Employment ID']].strip()
     name    = row[_PI['Employee Name']].strip()
     item_lc = row[_PI['Pay Item Name']].strip().lower()
+    psp_lc  = row[_PI_PSP_IDX].strip().lower() if _PI_PSP_IDX >= 0 else ''
     amt     = parse_amount(row[_PI['Value']])
     note    = row[_PI['Note']].strip()
-    if not eid or item_lc in SKIP_PI_TYPES:
+    if not eid:
         continue
     pi_emp_name[eid] = name
 
-    if item_lc in EXPENSE_PI_TYPES:
-        canon = 'expense'
+    # Classify by PSP Code first (authoritative); fall back to Pay Item Name if PSP missing
+    if psp_lc and psp_lc in PSP_CANON_MAP:
+        canon = PSP_CANON_MAP[psp_lc]
+        if canon is None:
+            continue  # skip — covered by base salary / hours sheets
+    elif item_lc in SKIP_PI_TYPES:
+        continue  # fallback skip by name
     elif item_lc == 'overtime (amount)':
         canon = 'overtime'
     else:
-        canon = item_lc   # 'allowance', 'wfh stipend', 'retro', 'other earnings'
+        canon = item_lc   # unknown — will surface as unrecognised on Pay Item Flags
 
     pi_totals[eid][canon] += amt
     if note and canon not in pi_notes[eid]:
         pi_notes[eid][canon] = note
 
-    if item_lc == 'retro':
+    if canon == 'retro':
         retro_by_emp_id[eid] = {'name': name, 'amount': amt, 'note': note}
 
 # For backward compat (Retro sheet uses these)
@@ -498,6 +527,7 @@ WFH_OUT_IDX     = oi('WFH Stipend')
 RETRO_IDX       = oi('Retro')
 OTHER_OUT_IDX   = oi('Other')
 OT_OUT_IDX      = oi('Overtime (Amount)')   # may be -1 if not in this output
+WIL_IDX         = oi('WIL')                 # Wages in Lieu
 HOURS_THRESHOLD = 86.67
 
 # Pay Item → Gusto output column mapping
@@ -509,6 +539,7 @@ PAYITEM_GUSTO_MAP = [
     ('expense',        'Expense/Reimb',   REIMB_IDX),
     ('other earnings', 'Other Earnings',  OTHER_OUT_IDX),
     ('overtime',       'Overtime',        OT_OUT_IDX),
+    ('wages in lieu',  'Wages in Lieu',   WIL_IDX),
 ]
 
 def oval(row, idx):
@@ -961,6 +992,23 @@ for ir, dept, miss_reason in input_only:
             desc = pi_notes.get(eid, {}).get(canon, '')
             append_pi_flag(ws4, name, eid, dept, label, 'Not in Gusto', desc, in_amt, 0.0)
 
+# ── Flag any Pay Items with unrecognised PSP/canonical type ─────────────────
+KNOWN_PI_CANONS = {c for c, _, _ in PAYITEM_GUSTO_MAP}
+for ir, or_, dept in matched:
+    eid  = ir[IN_EMP_ID]
+    name = ir[IN_NAME]
+    for canon, amt in pi_totals.get(eid, {}).items():
+        if canon not in KNOWN_PI_CANONS and amt >= VARIANCE_THRESHOLD:
+            append_pi_flag(ws4, name, eid, dept,
+                           f'Unknown: {canon}', 'Unknown Pay Item', '', amt, 0.0)
+for ir, dept, _ in input_only:
+    eid  = ir[IN_EMP_ID]
+    name = ir[IN_NAME]
+    for canon, amt in pi_totals.get(eid, {}).items():
+        if canon not in KNOWN_PI_CANONS and amt >= VARIANCE_THRESHOLD:
+            append_pi_flag(ws4, name, eid, dept,
+                           f'Unknown: {canon}', 'Unknown Pay Item', '', amt, 0.0)
+
 fmt_currency(ws4, ['G', 'H', 'I'])
 set_col_widths(ws4, [32, 10, 18, 18, 14, 36, 22, 22, 12])
 
@@ -1201,55 +1249,66 @@ for eid in sorted(all_retro_ids):
 fmt_currency(ws_retro, ['D', 'E', 'F'])
 set_col_widths(ws_retro, [35, 10, 18, 22, 22, 12, 14, 40])
 
-# ─── SHEET: EXPENSES (Pay Items tab vs Gusto Reimbursements) ─────────────────
-# SOURCE OF TRUTH: Pay Items tab (expense types: Expense Non-taxable,
-#   Expense Taxable, Mileage Non-taxable, Per diem Non-taxable, Per diem Taxable)
-# Compared against Gusto "Reimbursements" output column.
-# Shows ALL employees with expenses on either side (matches + mismatches + not in Gusto).
+# ─── SHEET: EXPENSES (Pay Items + Payroll Summary vs Gusto Reimbursements) ────
+# Shows three-way comparison: Pay Items total, Payroll Summary Total Expenses, Gusto output.
+# Both PI and PS are compared independently against Gusto Reimbursements.
 ws_exp = wb.create_sheet('Expenses')
 header_row(ws_exp, [
     'Employee Name', 'Emp ID', 'Department',
-    'Input Expenses\n(Pay Items)', 'Output Reimbursements\n(Gusto)',
-    'Difference', 'Match?', 'Expenses Description'
+    'Pay Items Total', 'Payroll Summary\nTotal', 'Gusto\nReimbursements',
+    'Pay Items\nDifference', 'Pay Items\nMatch?',
+    'Payroll Summary\nDifference', 'Payroll Summary\nMatch?',
+    'Expenses Description'
 ])
 freeze(ws_exp)
 
-def append_exp(ws, name, eid, dept, in_exp, out_exp, note, status_override=None):
-    diff  = round(in_exp - out_exp, 2)
+def append_exp(ws, name, eid, dept, pi_exp, ps_exp, out_exp, note, status_override=None):
+    pi_diff = round(pi_exp - out_exp, 2)
+    ps_diff = round(ps_exp - out_exp, 2)
     if status_override:
-        match = status_override
+        pi_match = status_override
+        ps_match = status_override
     else:
-        match = 'Match' if abs(diff) < VARIANCE_THRESHOLD else 'Mismatch'
-    mfill = GREEN if match == 'Match' else (ORANGE if match == 'Not in Gusto' else RED)
-    ws.append([name, eid, dept_slug(dept) if dept else '', in_exp, out_exp, diff, match, note])
+        pi_match = 'Match' if abs(pi_diff) < VARIANCE_THRESHOLD else 'Mismatch'
+        ps_match = 'Match' if abs(ps_diff) < VARIANCE_THRESHOLD else 'Mismatch'
+    pi_fill = GREEN if pi_match == 'Match' else (ORANGE if pi_match == 'Not in Gusto' else RED)
+    ps_fill = GREEN if ps_match == 'Match' else (ORANGE if ps_match == 'Not in Gusto' else RED)
+    ws.append([name, eid, dept_slug(dept) if dept else '',
+               pi_exp, ps_exp, out_exp,
+               pi_diff, pi_match,
+               ps_diff, ps_match,
+               note])
     r = ws.max_row
-    ws.cell(r, 7).fill = mfill
+    ws.cell(r, 8).fill  = pi_fill
+    ws.cell(r, 10).fill = ps_fill
     if r % 2 == 0:
-        for c in [1, 2, 3, 4, 5, 6, 8]:
+        for c in [1, 2, 3, 4, 5, 6, 7, 9, 11]:
             ws.cell(r, c).fill = ALT
 
 # Matched employees
 for ir, or_, dept in matched:
     eid     = ir[IN_EMP_ID]
     name    = ir[IN_NAME]
-    in_exp  = pi_totals.get(eid, {}).get('expense', 0.0)
+    pi_exp  = pi_totals.get(eid, {}).get('expense', 0.0)
+    ps_exp  = parse_amount(ir[IN_EXP]) if IN_EXP >= 0 else 0.0
     out_exp = oval(or_, REIMB_IDX) if REIMB_IDX >= 0 else 0.0
-    if in_exp == 0 and out_exp == 0:
+    if pi_exp == 0 and ps_exp == 0 and out_exp == 0:
         continue
     note = ir[IN_EXP_DESC].strip() if IN_EXP_DESC >= 0 else ''
-    append_exp(ws_exp, name, eid, dept, in_exp, out_exp, note)
+    append_exp(ws_exp, name, eid, dept, pi_exp, ps_exp, out_exp, note)
 
 # Input-only employees with expenses
 for ir, dept, miss_reason in input_only:
     eid    = ir[IN_EMP_ID]
-    in_exp = pi_totals.get(eid, {}).get('expense', 0.0)
-    if in_exp < VARIANCE_THRESHOLD:
+    pi_exp = pi_totals.get(eid, {}).get('expense', 0.0)
+    ps_exp = parse_amount(ir[IN_EXP]) if IN_EXP >= 0 else 0.0
+    if pi_exp < VARIANCE_THRESHOLD and ps_exp < VARIANCE_THRESHOLD:
         continue
     note = ir[IN_EXP_DESC].strip() if IN_EXP_DESC >= 0 else ''
-    append_exp(ws_exp, ir[IN_NAME], eid, dept, in_exp, 0.0, note, status_override='Not in Gusto')
+    append_exp(ws_exp, ir[IN_NAME], eid, dept, pi_exp, ps_exp, 0.0, note, status_override='Not in Gusto')
 
-fmt_currency(ws_exp, ['D', 'E', 'F'])
-set_col_widths(ws_exp, [35, 10, 18, 20, 20, 12, 14, 45])
+fmt_currency(ws_exp, ['D', 'E', 'F', 'G', 'I'])
+set_col_widths(ws_exp, [35, 10, 18, 14, 16, 18, 14, 12, 14, 12, 45])
 
 
 # PSP code → Gusto output column index
@@ -1448,6 +1507,39 @@ for ci, h in enumerate(out_headers, 1):
     col_letter = ws_out.cell(1, ci).column_letter
     max_len = max(len(str(h or '')), *(len(str(r[ci-1])) if ci-1 < len(r) else 0 for r in out_rows[:50]))
     ws_out.column_dimensions[col_letter].width = min(max_len + 2, 40)
+
+
+# ─── SHEET: PAYROLL SUMMARY (raw input — Payroll summary tab) ────────────────
+def _dump_excel_sheet(wb_target, sheet_name, source_ws_rows):
+    ws_raw = wb_target.create_sheet(sheet_name)
+    ws_raw.sheet_view.showGridLines = False
+    freeze(ws_raw)
+    for ri, row in enumerate(source_ws_rows, 1):
+        for ci, val in enumerate(row, 1):
+            cell = ws_raw.cell(ri, ci, val if val is not None else '')
+            if ri == 1:
+                cell.font = Font(bold=True, size=10, color='FFFFFFFF')
+                cell.fill = PatternFill('solid', fgColor='FF1F3864')
+                cell.alignment = Alignment(horizontal='center', wrap_text=True)
+            elif ri % 2 == 0:
+                cell.fill = ALT
+        if ri == 1:
+            ws_raw.row_dimensions[1].height = 28
+    # Auto-width capped at 50
+    if source_ws_rows:
+        for ci, h in enumerate(source_ws_rows[0], 1):
+            col_letter = ws_raw.cell(1, ci).column_letter
+            max_len = max(
+                len(str(h or '')),
+                *(len(str(r[ci-1]) if ci-1 < len(r) and r[ci-1] is not None else '') for r in source_ws_rows[1:51])
+            )
+            ws_raw.column_dimensions[col_letter].width = min(max_len + 2, 50)
+
+_ps_rows = list(_wb['Payroll summary'].iter_rows(values_only=True))
+_dump_excel_sheet(wb, 'Payroll Summary (Source)', _ps_rows)
+
+_pi_raw_rows = list(_wb['Pay Items'].iter_rows(values_only=True))
+_dump_excel_sheet(wb, 'Pay Items (Source)', _pi_raw_rows)
 
 # ─── SAVE ────────────────────────────────────────────────────────────────────
 wb.save(RESULT_PATH)
