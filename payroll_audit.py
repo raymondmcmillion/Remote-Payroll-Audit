@@ -1433,6 +1433,23 @@ for ir, or_, dept in matched:
 fmt_currency(ws_gross, ['E', 'F', 'G', 'I'])
 set_col_widths(ws_gross, [32, 10, 18, 35, 16, 18, 14, 18, 16, 14])
 
+# ─── PAY ITEM INPUT vs OUTPUT BALANCE ───────────────────────────────────────
+KNOWN_PI_CANONS_SET = {c for c, _, _ in PAYITEM_GUSTO_MAP}
+pi_input_total = round(sum(
+    amt
+    for eid_totals in pi_totals.values()
+    for canon, amt in eid_totals.items()
+    if canon in KNOWN_PI_CANONS_SET
+), 2)
+pi_output_total = round(sum(
+    oval(or_, out_idx)
+    for _, or_, _ in matched
+    for canon, label, out_idx in PAYITEM_GUSTO_MAP
+    if out_idx >= 0
+), 2)
+pi_balance_diff   = round(pi_input_total - pi_output_total, 2)
+pi_balance_status = 'Balanced' if abs(pi_balance_diff) < VARIANCE_THRESHOLD else 'OUT OF BALANCE'
+
 # ─── SUMMARY SHEET ───────────────────────────────────────────────────────────
 ws0 = wb.create_sheet('Summary', 0)
 ws0.sheet_view.showGridLines = False
@@ -1461,6 +1478,12 @@ summary_data = [
     ('Retro Payments',         ws_retro.max_row - 1),
     ('Expenses',               ws_exp.max_row - 1),
     ('Gross Up (Incentive Net)', ws_gross.max_row - 1),
+    ('', ''),
+    ('Pay Item Totals',         ''),
+    ('Total Input (Pay Items)', pi_input_total),
+    ('Total Output (Gusto)',    pi_output_total),
+    ('Difference',              pi_balance_diff),
+    ('Balance Status',          pi_balance_status),
 ]
 
 ws0.column_dimensions['A'].width = 28
@@ -1480,9 +1503,45 @@ for i, (label, value) in enumerate(summary_data, start=4):
         ws0.cell(i, 1).fill = H_FILL
         ws0.cell(i, 2).font = H_FONT
         ws0.cell(i, 2).fill = H_FILL
+    elif label == 'Balance Status':
+        color = '00AA00' if 'Balanced' in str(value) else 'CC0000'
+        ws0.cell(i, 1).font = Font(bold=True, size=10)
+        ws0.cell(i, 2).font = Font(bold=True, size=10, color=color)
+    elif label in ('Total Input (Pay Items)', 'Total Output (Gusto)', 'Difference'):
+        ws0.cell(i, 1).font = Font(bold=True, size=10)
+        ws0.cell(i, 2).number_format = '$#,##0.00'
+    elif label == 'Pay Item Totals':
+        ws0.cell(i, 1).font = H_FONT
+        ws0.cell(i, 1).fill = H_FILL
+        ws0.cell(i, 2).font = H_FONT
+        ws0.cell(i, 2).fill = H_FILL
     elif label:
         ws0.cell(i, 1).font = Font(bold=True, size=10)
 
+
+# ─── SHEET: PSP MAPPING (Remote PSP Code → Gusto Output Column) ─────────────
+ws_psp = wb.create_sheet('PSP Mapping')
+ws_psp.sheet_view.showGridLines = False
+CANON_TO_GUSTO = {canon: label for canon, label, _ in PAYITEM_GUSTO_MAP}
+header_row(ws_psp, ['Remote PSP Code', 'Maps To (Gusto Column)', 'Action'])
+freeze(ws_psp)
+for psp_code, canon in sorted(PSP_CANON_MAP.items()):
+    if canon is None:
+        gusto_col = '—'
+        action    = 'SKIPPED (covered by salary/hours sheets)'
+    else:
+        gusto_col = CANON_TO_GUSTO.get(canon, canon)
+        action    = 'Compared on Pay Item Flags'
+    ws_psp.append([psp_code, gusto_col, action])
+    r = ws_psp.max_row
+    if canon is None:
+        for c in range(1, 4):
+            ws_psp.cell(r, c).font = Font(color='888888', italic=True)
+    if r % 2 == 0:
+        for c in range(1, 4):
+            if ws_psp.cell(r, c).fill.fgColor.rgb == '00000000':
+                ws_psp.cell(r, c).fill = ALT
+set_col_widths(ws_psp, [30, 28, 42])
 
 # ─── SHEET: GUSTO OUTPUT (raw output CSV) ────────────────────────────────────
 ws_out = wb.create_sheet('Gusto Output')
